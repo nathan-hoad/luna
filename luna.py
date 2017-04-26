@@ -1,4 +1,11 @@
 #!/usr/bin/python
+import asyncio
+import itertools
+import json
+import os
+import weakref
+
+import gbulb
 from gi.repository import Gtk, Vte, Gio, GLib, Pango, Gdk
 
 base00 = "#000000"
@@ -33,7 +40,7 @@ FONTS = [
 ]
 
 SCROLLBACK = 100_000
-SHELL = Vte.get_user_shell()
+SHELL = ['/home/nathan/.local/bin/xonsh']
 
 COLORS = [
     base00,
@@ -55,13 +62,34 @@ COLORS = [
     base05,
 ]
 
+def change_font(terminal, *, left=None, name=None):
+    if left is not None:
+        terminal.font_position += -1 if left else 1
+
+        if terminal.font_position < 0:
+            terminal.font_position = len(FONTS) - 1
+        elif terminal.font_position >= len(FONTS):
+            terminal.font_position = 0
+        name = FONTS[terminal.font_position]
+
+    font = Pango.FontDescription.from_string(name)
+
+    old_font = terminal.get_font()
+    if old_font is not None:
+        font.set_size(old_font.get_size())
+
+    terminal.set_font(font)
+
 
 class Luna(Gtk.Application):
+    terminals = weakref.WeakValueDictionary()
+
     def __init__(self):
         super().__init__(
             application_id='com.nhoad.luna',
             flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
 
+        self.id_count = itertools.count()
         self.connect('command-line', self.on_command_line)
 
     def new_window(self, command_line):
@@ -87,7 +115,6 @@ class Luna(Gtk.Application):
 
         b = Gtk.VBox()
         b.add(terminal)
-        b.add(debugger)
         window.add(b)
         window.show_all()
         self.add_window(window)
@@ -95,7 +122,7 @@ class Luna(Gtk.Application):
     def configure_terminal(self, terminal):
         terminal.set_rewrap_on_resize(True)
         terminal.font_position = -1
-        self.change_font(terminal, left=False)
+        change_font(terminal, left=False)
 
         terminal.set_cursor_shape(Vte.CursorShape.BLOCK)
         terminal.set_cursor_blink_mode(Vte.CursorBlinkMode.OFF)
@@ -119,10 +146,10 @@ class Luna(Gtk.Application):
                 self.resize_font(terminal, -1)
                 return True
             elif keyval == Gdk.KEY_Left:
-                self.change_font(terminal, left=True)
+                change_font(terminal, left=True)
                 return True
             elif keyval == Gdk.KEY_Right:
-                self.change_font(terminal, left=False)
+                change_font(terminal, left=False)
                 return True
         elif event.state & Gdk.ModifierType.SUPER_MASK:
             if keyval == Gdk.KEY_C:
@@ -137,30 +164,14 @@ class Luna(Gtk.Application):
         terminal.copy_clipboard()
         terminal.copy_primary()
 
-    def change_font(self, terminal, *, left=None, name=None):
-        if left is not None:
-            terminal.font_position += -1 if left else 1
-
-            if terminal.font_position < 0:
-                terminal.font_position = len(FONTS) - 1
-            elif terminal.font_position >= len(FONTS):
-                terminal.font_position = 0
-            name = FONTS[terminal.font_position]
-
-        font = Pango.FontDescription.from_string(name)
-
-        old_font = terminal.get_font()
-        if old_font is not None:
-            font.set_size(old_font.get_size())
-
-        terminal.set_font(font)
-
     def resize_font(self, terminal, step):
         font = terminal.get_font()
         font.set_size((font.get_size() / Pango.SCALE + step) * Pango.SCALE)
         terminal.set_font(font)
 
     def setup_terminal(self, terminal):
+        terminal.id = next(self.id_count)
+        self.terminals[terminal.id] = terminal
         pty = Vte.Terminal.pty_new_sync(terminal, Vte.PtyFlags.NO_HELPER)
 
         terminal.connect('key-press-event', self.on_key_press)
@@ -172,8 +183,14 @@ class Luna(Gtk.Application):
             GLib.SpawnFlags.LEAVE_DESCRIPTORS_OPEN
         )
 
+        env = dict(os.environ)
+        env['LUNA_PORT'] = str(SERVER_PORT)
+        env['LUNA_ID'] = str(terminal.id)
+        env = ['{}={}'.format(k, v) for k, v in env.items()]
+
         pid, *streams = GLib.spawn_async(
-            [SHELL],
+            SHELL,
+            envp=env,
             flags=flags,
             child_setup=Vte.Pty.child_setup,
             user_data=pty,
@@ -201,6 +218,56 @@ class Luna(Gtk.Application):
 
         return 0
 
+class IPC:
+    def font(self, terminal, font):
+        if font:
+            change_font(terminal, left=None, name=font)
+        return terminal.get_font().get_family()
+
+    def shell(self, terminal, shell):
+        global SHELL
+        if shell:
+            SHELL = shell
+        return str(SHELL)
+
+    def __call__(self, message):
+        cmd = message.pop('cmd')
+
+        func = getattr(self, cmd, None)
+
+        if func is None:
+            return {'status': 'ERROR', 'message': 'No command by that name'}
+
+        id = message.pop('id')
+        terminal = Luna.terminals[id]
+        try:
+            ret = func(terminal, **message)
+        except Exception as e:
+            return {'status': 'ERROR', 'message': str(e)}
+        else:
+            return {'status': 'OK', 'message': ret or 'Nothing much to say'}
+
+ipc = IPC()
+del IPC
+
+
+async def client_connected(reader, writer):
+    line = await reader.readline()
+    if not line:
+        writer.close()
+        return
+    print('line', line)
+    j = json.loads(line)
+    print('json', j)
+
+    r = ipc(j)
+
+    writer.write(json.dumps(r).encode('utf8'))
+    writer.write(b'\n')
+    await writer.drain()
+    writer.close()
+
+
 if __name__ == '__main__':
     style_text = b"GtkWindow { background: black; }"
 
@@ -211,4 +278,11 @@ if __name__ == '__main__':
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
     )
     application = Luna()
-    application.run()
+
+    gbulb.install(gtk=True)
+    loop = gbulb.get_event_loop()
+
+    server = loop.run_until_complete(asyncio.start_server(client_connected, host='127.0.0.1', port=0))
+    SERVER_PORT = server.sockets[0].getsockname()[1]
+
+    loop.run_forever(application=application)
