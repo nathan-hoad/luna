@@ -62,6 +62,7 @@ COLORS = [
     base05,
 ]
 
+
 def change_font(terminal, *, left=None, name=None):
     if left is not None:
         terminal.font_position += -1 if left else 1
@@ -162,7 +163,6 @@ class Luna(Gtk.Application):
 
     def on_selection_changed(self, terminal):
         terminal.copy_clipboard()
-        terminal.copy_primary()
 
     def resize_font(self, terminal, step):
         font = terminal.get_font()
