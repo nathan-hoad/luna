@@ -40,7 +40,7 @@ FONTS = [
 ]
 
 SCROLLBACK = 100_000
-SHELL = ['/home/nathan/.local/bin/xonsh']
+SHELL = [Vte.get_user_shell()]
 
 COLORS = [
     base00,
