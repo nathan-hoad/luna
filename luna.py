@@ -25,6 +25,8 @@ base0D = "#01a0e4"
 base0E = "#a16a94"
 base0F = "#cdab53"
 
+
+BROADCAST = base03
 FOREGROUND = '#fff'
 BACKGROUND = base00
 FONTS = [
@@ -84,6 +86,7 @@ def change_font(terminal, *, left=None, name=None):
 
 class Luna(Gtk.Application):
     terminals = weakref.WeakValueDictionary()
+    broadcast_to = weakref.WeakSet()
 
     def __init__(self):
         super().__init__(
@@ -98,6 +101,7 @@ class Luna(Gtk.Application):
         terminal = Vte.Terminal.new()
         terminal.connect('child-exited', self.on_child_exited, window)
         terminal.connect('window-title-changed', self.set_window_title, window)
+        terminal.connect('commit', self.broadcast_to_terminals)
 
         self.setup_terminal(terminal)
         self.configure_terminal(terminal)
@@ -160,9 +164,32 @@ class Luna(Gtk.Application):
             elif keyval == Gdk.KEY_V:
                 terminal.paste_primary()
                 return True
+        elif event.state & Gdk.ModifierType.SHIFT_MASK:
+            if keyval == Gdk.KEY_space:
+                self.broadcast_add_or_remove(terminal)
+                return True
 
     def on_selection_changed(self, terminal):
         terminal.copy_clipboard()
+
+    def broadcast_add_or_remove(self, terminal):
+        if terminal in self.broadcast_to:
+            self.broadcast_to.remove(terminal)
+            terminal.set_color_background(self.bg)
+        else:
+            self.broadcast_to.add(terminal)
+            terminal.set_color_background(self.broadcast_bg)
+
+    def broadcast_to_terminals(self, source, data, length):
+        if source not in self.broadcast_to:
+            return
+
+        for terminal in self.broadcast_to:
+            if terminal is source:
+                continue
+            terminal.handler_block_by_func(self.broadcast_to_terminals)
+            terminal.feed_child(data, len(data))
+            terminal.handler_unblock_by_func(self.broadcast_to_terminals)
 
     def resize_font(self, terminal, step):
         font = terminal.get_font()
@@ -203,9 +230,11 @@ class Luna(Gtk.Application):
     def setup(self):
         self.fg = Gdk.RGBA()
         self.bg = Gdk.RGBA()
+        self.broadcast_bg = Gdk.RGBA()
 
         self.fg.parse(FOREGROUND)
         self.bg.parse(BACKGROUND)
+        self.broadcast_bg.parse(BROADCAST)
 
         self.colors = [Gdk.RGBA() for c in COLORS]
         [color.parse(s) for (color, s) in zip(self.colors, COLORS)]
